@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.2.6] - 2026-10-26
+
+### Changed
+- `--show-subdomains` now lists subdomains found by every passive source (CT, Wayback, VirusTotal, SecurityTrails, DNS), not just the DNS brute-force, and prints "none found" instead of nothing
+- DNS brute-force, MX lookup and CT search now also cover the registrable parent domain (e.g. `-d api.example.com` also searches `*.example.com`)
+- CT search still tries the parent domain when the exact-host query fails
+
+### Fixed
+- Update check offered older releases as "new" (e.g. v3.2.4 while running v3.2.5); `--update` would downgrade
+- DNS brute-force no longer reports every guessed name when the domain has wildcard DNS
+- CT results no longer include unrelated domains that merely end with the target name (e.g. `notexample.com`)
+
 ## [3.2.5] - 2026-10-26
 
 ### Added

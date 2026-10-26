@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -98,8 +99,8 @@ func CheckForUpdate() (*UpdateInfo, error) {
 	latestVersion := strings.TrimPrefix(release.TagName, "v")
 	currentVersion := strings.TrimPrefix(version.Version, "v")
 
-	if latestVersion == currentVersion {
-		return nil, nil // Already up to date
+	if !isNewerVersion(latestVersion, currentVersion) {
+		return nil, nil // Already up to date (or running a newer build)
 	}
 
 	// Find the appropriate asset for this platform. Support both
@@ -138,6 +139,41 @@ func CheckForUpdate() (*UpdateInfo, error) {
 		DownloadURL:    downloadURL,
 		AssetName:      matchedAsset,
 	}, nil
+}
+
+// isNewerVersion reports whether latest is a higher x.y.z version than current.
+// Any pre-release/build suffix (after '-' or '+') is ignored.
+func isNewerVersion(latest, current string) bool {
+	parse := func(v string) []int {
+		v = strings.TrimPrefix(v, "v")
+		if i := strings.IndexAny(v, "-+"); i >= 0 {
+			v = v[:i]
+		}
+		var parts []int
+		for _, p := range strings.Split(v, ".") {
+			n, err := strconv.Atoi(p)
+			if err != nil {
+				n = 0
+			}
+			parts = append(parts, n)
+		}
+		return parts
+	}
+
+	l, c := parse(latest), parse(current)
+	for i := 0; i < len(l) || i < len(c); i++ {
+		var lv, cv int
+		if i < len(l) {
+			lv = l[i]
+		}
+		if i < len(c) {
+			cv = c[i]
+		}
+		if lv != cv {
+			return lv > cv
+		}
+	}
+	return false
 }
 
 // DownloadUpdate downloads the update to a temporary file

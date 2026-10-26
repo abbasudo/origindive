@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/jhaxce/origindive/v3/pkg/passive/subdomain"
 )
 
 // SubdomainResponse represents the JSON response from SecurityTrails subdomains API
@@ -104,12 +106,12 @@ func searchWithKey(ctx context.Context, domain, apiKey string, timeout time.Dura
 	// Step 3: Resolve subdomains to IPs (limit to first 50 to avoid rate limits)
 	resolveCount := 0
 	maxResolve := 50
-	for _, subdomain := range subdomains {
+	for _, sub := range subdomains {
 		if resolveCount >= maxResolve {
 			break
 		}
 
-		fullDomain := subdomain + "." + domain
+		fullDomain := sub + "." + domain
 		ips, err := resolveToIPv4(ctx, fullDomain, 5*time.Second)
 		if err != nil {
 			continue // Skip failed resolutions
@@ -118,6 +120,7 @@ func searchWithKey(ctx context.Context, domain, apiKey string, timeout time.Dura
 		for _, ip := range ips {
 			ipSet[ip] = true
 		}
+		subdomain.Record(ctx, fullDomain, ips)
 		resolveCount++
 	}
 

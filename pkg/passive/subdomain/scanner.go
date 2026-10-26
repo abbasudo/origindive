@@ -82,6 +82,14 @@ func (s *Scanner) Scan(ctx context.Context, subdomains []string) (map[string][]s
 		subdomains = CommonSubdomains
 	}
 
+	// Detect wildcard DNS so every guessed name doesn't look like a real subdomain
+	wildcardIPs := make(map[string]bool)
+	if ips, err := s.resolveSubdomain(fmt.Sprintf("origindive-wildcard-%d", time.Now().UnixNano())); err == nil {
+		for _, ip := range ips {
+			wildcardIPs[ip] = true
+		}
+	}
+
 	// Create work channel
 	jobs := make(chan string, len(subdomains))
 	results := make(chan Result, len(subdomains))
@@ -122,7 +130,8 @@ func (s *Scanner) Scan(ctx context.Context, subdomains []string) (map[string][]s
 
 	// Collect results
 	for result := range results {
-		if result.Error == nil && len(result.IPs) > 0 {
+		if result.Error == nil && len(result.IPs) > 0 && !allIn(result.IPs, wildcardIPs) {
+			Record(ctx, result.Subdomain+"."+s.domain, result.IPs)
 			s.mu.Lock()
 			s.discovered[result.Subdomain] = result.IPs
 			s.mu.Unlock()
@@ -130,6 +139,19 @@ func (s *Scanner) Scan(ctx context.Context, subdomains []string) (map[string][]s
 	}
 
 	return s.discovered, nil
+}
+
+// allIn reports whether every IP is in the set (an empty set matches nothing)
+func allIn(ips []string, set map[string]bool) bool {
+	if len(set) == 0 {
+		return false
+	}
+	for _, ip := range ips {
+		if !set[ip] {
+			return false
+		}
+	}
+	return true
 }
 
 // resolveSubdomain resolves a subdomain to IP addresses

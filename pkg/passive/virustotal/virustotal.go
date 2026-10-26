@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/jhaxce/origindive/v3/pkg/passive/subdomain"
 )
 
 // VTSubdomainResponse represents the VirusTotal subdomains API response
@@ -170,20 +172,23 @@ func searchWithKey(ctx context.Context, domain, apiKey string, timeout time.Dura
 		}
 
 		// Also resolve the subdomain itself
-		subdomain := data.ID
-		if subdomain != "" {
+		name := data.ID
+		if name != "" {
 			// Resolve with short timeout to avoid delays
 			resolveCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-			addrs, err := net.DefaultResolver.LookupHost(resolveCtx, subdomain)
+			addrs, err := net.DefaultResolver.LookupHost(resolveCtx, name)
 			cancel()
 
 			if err == nil {
+				var resolved []string
 				for _, addr := range addrs {
 					parsedIP := net.ParseIP(addr)
 					if parsedIP != nil && parsedIP.To4() != nil {
 						ipSet[addr] = true
+						resolved = append(resolved, addr)
 					}
 				}
+				subdomain.Record(ctx, name, resolved)
 			}
 		}
 	}

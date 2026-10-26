@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/jhaxce/origindive/v3/pkg/passive/subdomain"
 )
 
 // CDXRecord represents a single record from the Wayback Machine CDX API
@@ -133,13 +135,13 @@ func resolveSubdomainsToIPs(ctx context.Context, subdomains []string, baseDomain
 	resolver := &net.Resolver{}
 
 	resolveCount := 0
-	for _, subdomain := range subdomains {
+	for _, name := range subdomains {
 		if resolveCount >= maxResolve {
 			break
 		}
 
 		ctxWithTimeout, cancel := context.WithTimeout(ctx, timeout)
-		addrs, err := resolver.LookupHost(ctxWithTimeout, subdomain)
+		addrs, err := resolver.LookupHost(ctxWithTimeout, name)
 		cancel()
 
 		if err != nil {
@@ -147,12 +149,15 @@ func resolveSubdomainsToIPs(ctx context.Context, subdomains []string, baseDomain
 		}
 
 		// Filter IPv4 only
+		var resolved []string
 		for _, addr := range addrs {
 			ip := net.ParseIP(addr)
 			if ip != nil && ip.To4() != nil {
 				ipSet[addr] = true
+				resolved = append(resolved, addr)
 			}
 		}
+		subdomain.Record(ctx, name, resolved)
 
 		resolveCount++
 	}

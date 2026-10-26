@@ -661,3 +661,22 @@ func TestCopyFile_InvalidDestination(t *testing.T) {
 		t.Error("Expected error for invalid destination path")
 	}
 }
+
+func TestIsNewerVersion(t *testing.T) {
+	tests := []struct {
+		latest, current string
+		want            bool
+	}{
+		{"3.2.5", "3.2.4", true},
+		{"3.2.4", "3.2.5", false}, // never offer a downgrade
+		{"3.2.5", "3.2.5", false},
+		{"3.10.0", "3.9.9", true},
+		{"v4.0", "3.9.9", true},
+		{"3.2.5", "3.2.5-show-subdomains", false},
+	}
+	for _, tt := range tests {
+		if got := isNewerVersion(tt.latest, tt.current); got != tt.want {
+			t.Errorf("isNewerVersion(%q, %q) = %v, want %v", tt.latest, tt.current, got, tt.want)
+		}
+	}
+}

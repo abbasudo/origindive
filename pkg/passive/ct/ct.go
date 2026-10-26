@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/jhaxce/origindive/v3/pkg/passive/subdomain"
 )
 
 // CTEntry represents a certificate transparency log entry
@@ -39,6 +41,12 @@ func SearchCrtSh(ctx context.Context, domain string, timeout time.Duration) ([]s
 	}
 
 	return ips, nil
+}
+
+// SearchCrtShSubdomains queries crt.sh for certificates of any subdomain of the domain
+func SearchCrtShSubdomains(ctx context.Context, domain string, timeout time.Duration) ([]string, error) {
+	url := fmt.Sprintf("https://crt.sh/json?q=%%25.%s", domain)
+	return searchCrtShURL(ctx, url, domain, timeout)
 }
 
 // searchCrtShURL performs the actual HTTP request and parsing
@@ -95,7 +103,7 @@ func searchCrtShURL(ctx context.Context, url, domain string, timeout time.Durati
 		for _, name := range names {
 			name = strings.TrimSpace(strings.ToLower(name))
 			// Skip wildcards and add valid subdomains
-			if name != "" && !strings.HasPrefix(name, "*") && strings.HasSuffix(name, domain) {
+			if name != "" && !strings.HasPrefix(name, "*") && (name == domain || strings.HasSuffix(name, "."+domain)) {
 				subdomainSet[name] = true
 			}
 		}
@@ -116,22 +124,25 @@ func resolveSubdomainsToIPs(ctx context.Context, subdomains []string, timeout ti
 	ipSet := make(map[string]bool)
 	resolver := &net.Resolver{}
 
-	for _, subdomain := range subdomains {
+	for _, name := range subdomains {
 		// Create context with timeout for each lookup
 		lookupCtx, cancel := context.WithTimeout(ctx, timeout)
 
-		ips, err := resolver.LookupIP(lookupCtx, "ip4", subdomain)
+		ips, err := resolver.LookupIP(lookupCtx, "ip4", name)
 		cancel()
 
 		if err != nil {
 			continue // Skip failed resolutions
 		}
 
+		var resolved []string
 		for _, ip := range ips {
 			if ip.To4() != nil {
 				ipSet[ip.String()] = true
+				resolved = append(resolved, ip.String())
 			}
 		}
+		subdomain.Record(ctx, name, resolved)
 	}
 
 	// Convert to slice

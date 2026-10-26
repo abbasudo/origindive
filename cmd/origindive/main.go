@@ -427,7 +427,7 @@ func parseFlags() (*core.Config, bool) {
 	pflag.Float64Var(&config.MinConfidence, "min-confidence", 0.7, "Minimum confidence score (0.0-1.0)")
 	var passiveSources string
 	pflag.StringVar(&passiveSources, "passive-sources", "", "Comma-separated passive sources (ct,dns,shodan,censys)")
-	pflag.BoolVar(&config.ShowSubdomains, "show-subdomains", false, "Display resolved subdomains and their IPs (dns source)")
+	pflag.BoolVar(&config.ShowSubdomains, "show-subdomains", false, "Display resolved subdomains and their IPs from all passive sources")
 
 	// Output flags
 	outputFlag := pflag.StringP("output", "o", "", "Output file path (use '-o' alone for auto-generated name, or '-o=file.txt' for custom)")
@@ -978,6 +978,10 @@ func runPassiveRecon(config *core.Config) ([]string, error) {
 	// Channel for collecting IPs from different sources
 	ipChan := make(chan string, 100)
 
+	// Collect every resolved subdomain across sources for --show-subdomains
+	recorder := subdomain.NewRecorder()
+	ctx := subdomain.WithRecorder(context.Background(), recorder)
+
 	// Start goroutines for each passive source (if enabled)
 	sources := getEnabledPassiveSources(config)
 	wg.Add(len(sources))
@@ -985,7 +989,7 @@ func runPassiveRecon(config *core.Config) ([]string, error) {
 	for _, source := range sources {
 		go func(src string) {
 			defer wg.Done()
-			ips, err := queryPassiveSource(src, config)
+			ips, err := queryPassiveSource(ctx, src, config)
 			if err != nil {
 				if !config.Quiet && !config.SilentErrors {
 					fmt.Fprintf(os.Stderr, "%s[!] %s: %s%s\n", colors.YELLOW, src, err, colors.NC)
@@ -1015,6 +1019,10 @@ func runPassiveRecon(config *core.Config) ([]string, error) {
 		mu.Unlock()
 	}
 
+	if config.ShowSubdomains && !config.Quiet {
+		fmt.Print(formatResolvedSubdomains(recorder.Results()))
+	}
+
 	return discoveredIPs, nil
 }
 
@@ -1030,7 +1038,7 @@ func getEnabledPassiveSources(config *core.Config) []string {
 }
 
 // queryPassiveSource queries a specific passive intelligence source
-func queryPassiveSource(source string, config *core.Config) ([]string, error) {
+func queryPassiveSource(parent context.Context, source string, config *core.Config) ([]string, error) {
 	if !config.Quiet {
 		fmt.Printf("%s[*] Querying %s...%s\n", colors.CYAN, source, colors.NC)
 	}
@@ -1038,34 +1046,34 @@ func queryPassiveSource(source string, config *core.Config) ([]string, error) {
 	switch strings.ToLower(source) {
 	case "ct":
 		// Certificate Transparency logs (free)
-		return queryCertificateTransparency(config.Domain, config)
+		return queryCertificateTransparency(parent, config.Domain, config)
 	case "dns":
 		// DNS history (free via public resolvers)
-		return queryDNSHistory(config.Domain, config)
+		return queryDNSHistory(parent, config.Domain, config)
 	case "shodan":
 		// Shodan API (requires key)
-		return queryShodan(config.Domain, config)
+		return queryShodan(parent, config.Domain, config)
 	case "censys":
 		// Censys API (requires key)
-		return queryCensys(config.Domain, config)
+		return queryCensys(parent, config.Domain, config)
 	case "securitytrails":
 		// SecurityTrails API (requires key)
-		return querySecurityTrails(config.Domain, config)
+		return querySecurityTrails(parent, config.Domain, config)
 	case "zoomeye":
 		// ZoomEye API (requires key)
-		return queryZoomEye(config.Domain, config)
+		return queryZoomEye(parent, config.Domain, config)
 	case "wayback":
 		// Wayback Machine (free)
-		return queryWayback(config.Domain, config)
+		return queryWayback(parent, config.Domain, config)
 	case "virustotal":
 		// VirusTotal API (free tier with rate limits)
-		return queryVirusTotal(config.Domain, config)
+		return queryVirusTotal(parent, config.Domain, config)
 	case "viewdns":
 		// ViewDNS API (requires key)
-		return queryViewDNS(config.Domain, config)
+		return queryViewDNS(parent, config.Domain, config)
 	case "dnsdumpster":
 		// DNSDumpster (free web scraping)
-		return queryDNSDumpster(config.Domain, config)
+		return queryDNSDumpster(parent, config.Domain, config)
 	default:
 		return nil, fmt.Errorf("unknown passive source: %s", source)
 	}
@@ -1081,12 +1089,23 @@ func passiveTimeout(config *core.Config) time.Duration {
 }
 
 // queryCertificateTransparency searches CT logs for domain certificates
-func queryCertificateTransparency(domain string, config *core.Config) ([]string, error) {
+func queryCertificateTransparency(parent context.Context, domain string, config *core.Config) ([]string, error) {
 	t := passiveTimeout(config)
-	ctx, cancel := context.WithTimeout(context.Background(), t)
+	ctx, cancel := context.WithTimeout(parent, t)
 	defer cancel()
 
 	ips, err := ct.SearchCrtSh(ctx, domain, t)
+
+	// Also search sibling subdomains under the registrable domain, even if the
+	// exact-host search failed
+	if apex := subdomain.ApexDomain(domain); apex != domain {
+		apexIPs, apexErr := ct.SearchCrtShSubdomains(ctx, apex, t)
+		if apexErr == nil {
+			ips = append(ips, apexIPs...)
+			err = nil
+		}
+	}
+
 	if err != nil {
 		return []string{}, fmt.Errorf("CT search failed: %w", err)
 	}
@@ -1095,55 +1114,82 @@ func queryCertificateTransparency(domain string, config *core.Config) ([]string,
 }
 
 // queryDNSHistory queries DNS history and MX records for the domain
-func queryDNSHistory(domain string, config *core.Config) ([]string, error) {
+func queryDNSHistory(parent context.Context, domain string, config *core.Config) ([]string, error) {
 	var allIPs []string
 
-	// Phase 1: Subdomain enumeration
+	// Phase 1: Subdomain enumeration under the domain and its registrable parent
 	fmt.Printf("  → Enumerating subdomains...\n")
 	t := passiveTimeout(config)
-	subScanner := subdomain.NewScanner(domain, 20, t)
-	ctx, cancel := context.WithTimeout(context.Background(), t*4)
+	ctx, cancel := context.WithTimeout(parent, t*4)
 	defer cancel()
 
-	subResults, err := subScanner.Scan(ctx, subdomain.CommonSubdomains)
-	if err == nil && len(subResults) > 0 {
-		subIPs := subScanner.GetAllIPs()
-		msg := fmt.Sprintf("  → Found %d IPs from %d subdomains\n", len(subIPs), len(subResults))
-		if config.ShowSubdomains {
-			msg += formatResolvedSubdomains(domain, subResults)
+	// Record the target itself so it is listed even if no subdomains resolve
+	if addrs, err := net.DefaultResolver.LookupIP(ctx, "ip4", domain); err == nil {
+		var ips []string
+		for _, addr := range addrs {
+			ips = append(ips, addr.String())
 		}
-		fmt.Print(msg) // single write so concurrent sources don't interleave lines
+		subdomain.Record(ctx, domain, ips)
+	}
+
+	bases := []string{domain}
+	if apex := subdomain.ApexDomain(domain); apex != domain {
+		bases = append(bases, apex)
+	}
+
+	foundSubs := 0
+	var subIPs []string
+	for _, base := range bases {
+		subScanner := subdomain.NewScanner(base, 20, t)
+		subResults, err := subScanner.Scan(ctx, subdomain.CommonSubdomains)
+		if err == nil {
+			foundSubs += len(subResults)
+			subIPs = append(subIPs, subScanner.GetAllIPs()...)
+		}
+	}
+	if foundSubs > 0 {
+		subIPs = dedupeStrings(subIPs)
+		fmt.Printf("  → Found %d IPs from %d subdomains\n", len(subIPs), foundSubs)
 		allIPs = append(allIPs, subIPs...)
 	}
 
 	// Phase 2: MX record analysis
 	fmt.Printf("  → Analyzing MX records...\n")
-	mxRecords, err := passivedns.LookupMX(ctx, domain, t)
-	if err == nil && len(mxRecords) > 0 {
-		mxIPs := passivedns.GetAllMXIPs(mxRecords)
-		fmt.Printf("  → Found %d IPs from %d MX records\n", len(mxIPs), len(mxRecords))
-		allIPs = append(allIPs, mxIPs...)
+	for _, base := range bases {
+		mxRecords, err := passivedns.LookupMX(ctx, base, t)
+		if err == nil && len(mxRecords) > 0 {
+			mxIPs := passivedns.GetAllMXIPs(mxRecords)
+			fmt.Printf("  → Found %d IPs from %d MX records (%s)\n", len(mxIPs), len(mxRecords), base)
+			allIPs = append(allIPs, mxIPs...)
+		}
 	}
 
 	if len(allIPs) == 0 {
 		return []string{}, fmt.Errorf("no IPs discovered from DNS enumeration")
 	}
 
-	// Deduplicate
-	seen := make(map[string]bool)
-	var unique []string
-	for _, ip := range allIPs {
-		if !seen[ip] {
-			seen[ip] = true
-			unique = append(unique, ip)
-		}
-	}
-
-	return unique, nil
+	return dedupeStrings(allIPs), nil
 }
 
-// formatResolvedSubdomains renders subdomain -> IP mappings, sorted by subdomain
-func formatResolvedSubdomains(domain string, results map[string][]string) string {
+// dedupeStrings returns the values with duplicates removed, keeping first-seen order
+func dedupeStrings(values []string) []string {
+	seen := make(map[string]bool)
+	var unique []string
+	for _, v := range values {
+		if !seen[v] {
+			seen[v] = true
+			unique = append(unique, v)
+		}
+	}
+	return unique
+}
+
+// formatResolvedSubdomains renders hostname -> IP mappings, sorted by hostname
+func formatResolvedSubdomains(results map[string][]string) string {
+	if len(results) == 0 {
+		return "  → Resolved subdomains: none found\n"
+	}
+
 	names := make([]string, 0, len(results))
 	for name := range results {
 		names = append(names, name)
@@ -1151,21 +1197,21 @@ func formatResolvedSubdomains(domain string, results map[string][]string) string
 	sort.Strings(names)
 
 	var b strings.Builder
-	b.WriteString("  → Resolved subdomains:\n")
+	fmt.Fprintf(&b, "  → Resolved subdomains (%d):\n", len(names))
 	for _, name := range names {
-		fmt.Fprintf(&b, "    %s.%s → %s\n", name, domain, strings.Join(results[name], ", "))
+		fmt.Fprintf(&b, "    %s → %s\n", name, strings.Join(results[name], ", "))
 	}
 	return b.String()
 }
 
 // queryShodan searches Shodan for IPs hosting the domain
-func queryShodan(domain string, config *core.Config) ([]string, error) {
+func queryShodan(parent context.Context, domain string, config *core.Config) ([]string, error) {
 	if len(config.ShodanKeys) == 0 {
 		return []string{}, fmt.Errorf("no Shodan API keys configured")
 	}
 
 	t := passiveTimeout(config)
-	ctx, cancel := context.WithTimeout(context.Background(), t)
+	ctx, cancel := context.WithTimeout(parent, t)
 	defer cancel()
 
 	ips, err := shodan.SearchHostname(ctx, domain, config.ShodanKeys, t)
@@ -1177,13 +1223,13 @@ func queryShodan(domain string, config *core.Config) ([]string, error) {
 }
 
 // queryCensys searches Censys for IPs hosting the domain
-func queryCensys(domain string, config *core.Config) ([]string, error) {
+func queryCensys(parent context.Context, domain string, config *core.Config) ([]string, error) {
 	if len(config.CensysTokens) == 0 {
 		return []string{}, fmt.Errorf("no Censys PAT tokens configured")
 	}
 
 	t := passiveTimeout(config)
-	ctx, cancel := context.WithTimeout(context.Background(), t)
+	ctx, cancel := context.WithTimeout(parent, t)
 	defer cancel()
 
 	ips, err := censys.SearchHosts(ctx, domain, config.CensysTokens, config.CensysOrgID, t)
@@ -1195,13 +1241,13 @@ func queryCensys(domain string, config *core.Config) ([]string, error) {
 }
 
 // querySecurityTrails searches SecurityTrails for subdomains and historical IPs
-func querySecurityTrails(domain string, config *core.Config) ([]string, error) {
+func querySecurityTrails(parent context.Context, domain string, config *core.Config) ([]string, error) {
 	if len(config.SecurityTrailsKeys) == 0 {
 		return []string{}, fmt.Errorf("no SecurityTrails API keys configured")
 	}
 
 	t := passiveTimeout(config)
-	ctx, cancel := context.WithTimeout(context.Background(), t)
+	ctx, cancel := context.WithTimeout(parent, t)
 	defer cancel()
 
 	ips, err := securitytrails.SearchSubdomainsAndHistory(ctx, domain, config.SecurityTrailsKeys, t)
@@ -1213,13 +1259,13 @@ func querySecurityTrails(domain string, config *core.Config) ([]string, error) {
 }
 
 // queryZoomEye searches ZoomEye for hosts matching the domain
-func queryZoomEye(domain string, config *core.Config) ([]string, error) {
+func queryZoomEye(parent context.Context, domain string, config *core.Config) ([]string, error) {
 	if len(config.ZoomEyeKeys) == 0 {
 		return []string{}, fmt.Errorf("no ZoomEye API keys configured")
 	}
 
 	t := passiveTimeout(config)
-	ctx, cancel := context.WithTimeout(context.Background(), t)
+	ctx, cancel := context.WithTimeout(parent, t)
 	defer cancel()
 
 	ips, err := zoomeye.SearchHost(ctx, domain, config.ZoomEyeKeys, t)
@@ -1231,10 +1277,10 @@ func queryZoomEye(domain string, config *core.Config) ([]string, error) {
 }
 
 // queryWayback searches the Wayback Machine CDX API for historical subdomains
-func queryWayback(domain string, config *core.Config) ([]string, error) {
+func queryWayback(parent context.Context, domain string, config *core.Config) ([]string, error) {
 	// Wayback Machine is free - no API key needed
 	t := passiveTimeout(config)
-	ctx, cancel := context.WithTimeout(context.Background(), t)
+	ctx, cancel := context.WithTimeout(parent, t)
 	defer cancel()
 
 	ips, err := wayback.SearchSubdomains(ctx, domain, t)
@@ -1246,13 +1292,13 @@ func queryWayback(domain string, config *core.Config) ([]string, error) {
 }
 
 // queryVirusTotal searches VirusTotal for subdomains and DNS records
-func queryVirusTotal(domain string, config *core.Config) ([]string, error) {
+func queryVirusTotal(parent context.Context, domain string, config *core.Config) ([]string, error) {
 	if len(config.VirusTotalKeys) == 0 {
 		return []string{}, fmt.Errorf("no VirusTotal API keys configured")
 	}
 
 	t := passiveTimeout(config)
-	ctx, cancel := context.WithTimeout(context.Background(), t)
+	ctx, cancel := context.WithTimeout(parent, t)
 	defer cancel()
 
 	ips, err := virustotal.SearchSubdomains(ctx, domain, config.VirusTotalKeys, t)
@@ -1264,13 +1310,13 @@ func queryVirusTotal(domain string, config *core.Config) ([]string, error) {
 }
 
 // queryViewDNS searches ViewDNS reverse IP for related domains
-func queryViewDNS(domain string, config *core.Config) ([]string, error) {
+func queryViewDNS(parent context.Context, domain string, config *core.Config) ([]string, error) {
 	if len(config.ViewDNSKeys) == 0 {
 		return []string{}, fmt.Errorf("no ViewDNS API keys configured")
 	}
 
 	t := passiveTimeout(config)
-	ctx, cancel := context.WithTimeout(context.Background(), t)
+	ctx, cancel := context.WithTimeout(parent, t)
 	defer cancel()
 
 	ips, err := viewdns.SearchReverseIP(ctx, domain, config.ViewDNSKeys, t)
@@ -1282,13 +1328,13 @@ func queryViewDNS(domain string, config *core.Config) ([]string, error) {
 }
 
 // queryDNSDumpster scrapes DNSDumpster for subdomains and IPs
-func queryDNSDumpster(domain string, config *core.Config) ([]string, error) {
+func queryDNSDumpster(parent context.Context, domain string, config *core.Config) ([]string, error) {
 	if len(config.DNSDumpsterKeys) == 0 {
 		return []string{}, fmt.Errorf("no DNSDumpster API keys configured")
 	}
 
 	t := passiveTimeout(config)
-	ctx, cancel := context.WithTimeout(context.Background(), t)
+	ctx, cancel := context.WithTimeout(parent, t)
 	defer cancel()
 
 	ips, err := dnsdumpster.SearchDomain(ctx, domain, config.DNSDumpsterKeys, t)

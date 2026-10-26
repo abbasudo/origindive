@@ -31,18 +31,26 @@ func TestHelp_Flag(t *testing.T) {
 // TestFormatResolvedSubdomains tests the --show-subdomains output
 func TestFormatResolvedSubdomains(t *testing.T) {
 	results := map[string][]string{
-		"mail": {"203.0.113.12"},
-		"api":  {"203.0.113.10", "203.0.113.20"},
-		"dev":  {"203.0.113.11"},
+		"mail.example.com": {"203.0.113.12"},
+		"api.example.com":  {"203.0.113.10", "203.0.113.20"},
+		"dev.example.com":  {"203.0.113.11"},
 	}
 
-	got := formatResolvedSubdomains("example.com", results)
-	want := "  → Resolved subdomains:\n" +
+	got := formatResolvedSubdomains(results)
+	want := "  → Resolved subdomains (3):\n" +
 		"    api.example.com → 203.0.113.10, 203.0.113.20\n" +
 		"    dev.example.com → 203.0.113.11\n" +
 		"    mail.example.com → 203.0.113.12\n"
 
 	if got != want {
 		t.Errorf("formatResolvedSubdomains() =\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// TestFormatResolvedSubdomains_Empty tests output when nothing resolved
+func TestFormatResolvedSubdomains_Empty(t *testing.T) {
+	got := formatResolvedSubdomains(map[string][]string{})
+	if got != "  → Resolved subdomains: none found\n" {
+		t.Errorf("formatResolvedSubdomains(empty) = %q", got)
 	}
 }
