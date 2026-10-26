@@ -127,6 +127,7 @@ origindive -d example.com -i ips.txt --verify --filter-unique
 | `--passive` | Passive reconnaissance only |
 | `--auto-scan` | Passive then active scan |
 | `--passive-sources` | Comma-separated sources |
+| `--show-subdomains` | List each resolved subdomain and its IPs (`dns` source) |
 | `--min-confidence` | Minimum confidence score (0.0-1.0) |
 
 ### Output

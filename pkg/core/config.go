@@ -77,6 +77,7 @@ type Config struct {
 	AutoScan       bool     `yaml:"auto_scan" json:"auto_scan"`
 	MinConfidence  float64  `yaml:"min_confidence" json:"min_confidence"`
 	PassiveSources []string `yaml:"passive_sources" json:"passive_sources"`
+	ShowSubdomains bool     `yaml:"show_subdomains" json:"show_subdomains"`
 
 	// API Keys for passive sources (flat structure for easier YAML editing)
 	ShodanKeys         []string `yaml:"shodan_keys" json:"shodan_keys"`
@@ -237,6 +238,9 @@ func (c *Config) MergeWithCLI(cli *Config) {
 	}
 	if len(cli.PassiveSources) > 0 {
 		c.PassiveSources = cli.PassiveSources
+	}
+	if cli.ShowSubdomains {
+		c.ShowSubdomains = cli.ShowSubdomains
 	}
 	// Note: API keys now loaded from global config only, not CLI
 	if cli.OutputFile != "" {

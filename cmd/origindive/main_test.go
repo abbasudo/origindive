@@ -27,3 +27,22 @@ func TestHelp_Flag(t *testing.T) {
 // Note: Testing main() directly is challenging because it calls os.Exit()
 // Best practice is to extract logic into testable functions and test those
 // For now, these placeholder tests ensure the package compiles
+
+// TestFormatResolvedSubdomains tests the --show-subdomains output
+func TestFormatResolvedSubdomains(t *testing.T) {
+	results := map[string][]string{
+		"mail": {"203.0.113.12"},
+		"api":  {"203.0.113.10", "203.0.113.20"},
+		"dev":  {"203.0.113.11"},
+	}
+
+	got := formatResolvedSubdomains("example.com", results)
+	want := "  → Resolved subdomains:\n" +
+		"    api.example.com → 203.0.113.10, 203.0.113.20\n" +
+		"    dev.example.com → 203.0.113.11\n" +
+		"    mail.example.com → 203.0.113.12\n"
+
+	if got != want {
+		t.Errorf("formatResolvedSubdomains() =\n%s\nwant:\n%s", got, want)
+	}
+}

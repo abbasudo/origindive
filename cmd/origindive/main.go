@@ -427,6 +427,7 @@ func parseFlags() (*core.Config, bool) {
 	pflag.Float64Var(&config.MinConfidence, "min-confidence", 0.7, "Minimum confidence score (0.0-1.0)")
 	var passiveSources string
 	pflag.StringVar(&passiveSources, "passive-sources", "", "Comma-separated passive sources (ct,dns,shodan,censys)")
+	pflag.BoolVar(&config.ShowSubdomains, "show-subdomains", false, "Display resolved subdomains and their IPs (dns source)")
 
 	// Output flags
 	outputFlag := pflag.StringP("output", "o", "", "Output file path (use '-o' alone for auto-generated name, or '-o=file.txt' for custom)")
@@ -1107,7 +1108,11 @@ func queryDNSHistory(domain string, config *core.Config) ([]string, error) {
 	subResults, err := subScanner.Scan(ctx, subdomain.CommonSubdomains)
 	if err == nil && len(subResults) > 0 {
 		subIPs := subScanner.GetAllIPs()
-		fmt.Printf("  → Found %d IPs from %d subdomains\n", len(subIPs), len(subResults))
+		msg := fmt.Sprintf("  → Found %d IPs from %d subdomains\n", len(subIPs), len(subResults))
+		if config.ShowSubdomains {
+			msg += formatResolvedSubdomains(domain, subResults)
+		}
+		fmt.Print(msg) // single write so concurrent sources don't interleave lines
 		allIPs = append(allIPs, subIPs...)
 	}
 
@@ -1135,6 +1140,22 @@ func queryDNSHistory(domain string, config *core.Config) ([]string, error) {
 	}
 
 	return unique, nil
+}
+
+// formatResolvedSubdomains renders subdomain -> IP mappings, sorted by subdomain
+func formatResolvedSubdomains(domain string, results map[string][]string) string {
+	names := make([]string, 0, len(results))
+	for name := range results {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	b.WriteString("  → Resolved subdomains:\n")
+	for _, name := range names {
+		fmt.Fprintf(&b, "    %s.%s → %s\n", name, domain, strings.Join(results[name], ", "))
+	}
+	return b.String()
 }
 
 // queryShodan searches Shodan for IPs hosting the domain
